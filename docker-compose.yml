@@ -1,0 +1,116 @@
+# End-to-End Streaming Analytics: Logistics & Last-Mile Delivery
+# Kafka (KRaft, no ZooKeeper) + MySQL + Grafana in ONE compose file.
+# Python producer/processor run on the Windows host (not in Docker).
+#
+# Host ports:
+#   Grafana -> http://localhost:3000   (fixed, required)
+#   MySQL   -> 127.0.0.1:3307 -> container 3306 (loopback only)
+#   Kafka   -> 127.0.0.1:9092          (loopback only, for Windows Python scripts)
+#
+# Image versions are pinned on purpose (see README "Versions").
+
+name: logistics-streaming
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: logistics-kafka
+    hostname: kafka
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-9092}:9092"
+    environment:
+      CLUSTER_ID: "${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # INTERNAL  = other containers (kafka:19092)
+      # EXTERNAL  = Python on Windows (127.0.0.1:9092)
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:19092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://127.0.0.1:${KAFKA_HOST_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topics are created explicitly by producer.py
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:19092 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+
+  mysql:
+    image: mysql:8.4
+    container_name: logistics-mysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3307}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-logistics_streaming_project}"
+      MYSQL_USER: "${MYSQL_USER:-logistics_user}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}"
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Runs ONLY the first time the mysql_data volume is created.
+      # init_schema.py applies the same file idempotently at any time.
+      - ./mysql/init/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: logistics-grafana
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      # Container port 3000 -> Windows host port 3000. Do not change.
+      - "3000:3000"
+    environment:
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_SERVER_ROOT_URL: "http://localhost:3000/"
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: "5s"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/01_delivery_operations_control_tower.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Used by provisioning/datasources/mysql.yml
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-logistics_streaming_project}"
+      MYSQL_USER: "${MYSQL_USER:-logistics_user}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/health | grep -q '\"database\": *\"ok\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  mysql_data:
+    name: logistics_streaming_mysql_data
+  grafana_data:
+    name: logistics_streaming_grafana_data

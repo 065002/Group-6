@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Runtime output
+logs/*.log
+logs/*.json
+
+# Large/source data (keep the folder, not the CSV)
+data/*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
